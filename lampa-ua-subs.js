@@ -1,97 +1,157 @@
 /**
- * Lampa UA Subs v0.1
- * Automatic Ukrainian subtitles via OpenSubtitles
+ * Lampa UA Subs v0.2.0
+ * Автоматичний пошук українських субтитрів через OpenSubtitles.com
  */
 (function () {
     'use strict';
 
-    if (window.ua_subs_plugin) return;
-    window.ua_subs_plugin = true;
+    if (window.__lampaUaSubsV2) return;
+    window.__lampaUaSubsV2 = true;
 
-    var VERSION = '0.1.0';
+    var VERSION = '0.2.0';
     var API = 'https://api.opensubtitles.com/api/v1';
+    var PREFIX = 'ua_subs_v2_';
+    var TOKEN_TTL = 20 * 60 * 60 * 1000;
 
     function log() {
-        var args = Array.prototype.slice.call(arguments);
-        args.unshift('[UA Subs]');
-        console.log.apply(console, args);
+        try {
+            var args = Array.prototype.slice.call(arguments);
+            args.unshift('[UA Subs]');
+            console.log.apply(console, args);
+        } catch (_) {}
     }
 
-    function notify(text) {
+    function noty(text) {
         try {
-            Lampa.Noty.show('UA Subs: ' + text);
-        } catch (e) {
+            if (window.Lampa && Lampa.Noty && typeof Lampa.Noty.show === 'function') {
+                Lampa.Noty.show('UA Subs: ' + text);
+            } else {
+                log(text);
+            }
+        } catch (_) {
             log(text);
         }
     }
 
-    function setting(name, fallback) {
+    function storageGet(name, fallback) {
         try {
-            var value = Lampa.Storage.get(name, fallback);
-            return value == null ? fallback : value;
-        } catch (e) {
+            var value = Lampa.Storage.get(PREFIX + name, fallback);
+            return value === undefined || value === null ? fallback : value;
+        } catch (_) {
             return fallback;
         }
     }
 
-    function isTrue(value) {
-        return (
-            value === true ||
-            value === 'true' ||
-            value === 1 ||
-            value === '1'
-        );
+    function storageSet(name, value) {
+        try {
+            Lampa.Storage.set(PREFIX + name, value);
+        } catch (_) {}
     }
 
-    function getMovie() {
+    function boolSetting(name, fallback) {
+        var value = storageGet(name, fallback ? 'true' : 'false');
+
+        return value === true ||
+            value === 1 ||
+            value === '1' ||
+            value === 'true';
+    }
+
+    function activeMovie() {
         try {
-            var active = Lampa.Activity.active() || {};
+            var activity =
+                Lampa.Activity &&
+                typeof Lampa.Activity.active === 'function'
+                    ? Lampa.Activity.active()
+                    : null;
+
+            if (!activity) return {};
 
             return (
-                active.movie ||
-                active.card ||
-                (active.activity && active.activity.movie) ||
+                activity.movie ||
+                activity.card ||
+                (activity.activity && activity.activity.movie) ||
+                (activity.data && activity.data.movie) ||
                 {}
             );
-        } catch (e) {
+        } catch (_) {
             return {};
         }
     }
 
-    function getYear(movie) {
-        var date =
-            movie.release_date ||
-            movie.first_air_date ||
-            '';
+    function firstValue() {
+        for (var i = 0; i < arguments.length; i++) {
+            var value = arguments[i];
 
-        return String(date).slice(0, 4);
+            if (
+                value !== undefined &&
+                value !== null &&
+                String(value).trim() !== ''
+            ) {
+                return value;
+            }
+        }
+
+        return '';
     }
 
     function normalize(value) {
-        return String(value || '')
-            .trim()
-            .toLowerCase();
+        return String(value || '').trim().toLowerCase();
     }
 
-    /**
-     * Try to determine whether Original/English
-     * audio was selected.
-     */
-    function isOriginal(element, movie) {
-        if (!isTrue(setting('ua_subs_original_only', true))) {
-            return true;
-        }
-
-        var voice = normalize(
-            element.voice_name ||
-            element.voice ||
-            element.translation ||
-            ''
+    function yearOf(movie) {
+        var date = firstValue(
+            movie.release_date,
+            movie.first_air_date,
+            movie.year
         );
 
-        var originalLanguage = normalize(
-            movie.original_language || ''
+        var match = String(date || '').match(/\d{4}/);
+
+        return match ? match[0] : '';
+    }
+
+    function episodeMeta(movie, element) {
+        return {
+            season: firstValue(
+                element.season,
+                element.season_number,
+                element.s,
+                movie.season_number,
+                movie.season
+            ),
+
+            episode: firstValue(
+                element.episode,
+                element.episode_number,
+                element.e,
+                movie.episode_number,
+                movie.episode
+            )
+        };
+    }
+
+    function selectedVoiceText(element) {
+        return normalize(
+            [
+                element.voice_name,
+                element.voice,
+                element.translation,
+                element.translate,
+                element.audio,
+                element.audio_name,
+                element.title
+            ]
+                .filter(Boolean)
+                .join(' ')
         );
+    }
+
+    function isOriginalVoice(element, movie) {
+        if (!boolSetting('original_only', true)) return true;
+
+        var text = selectedVoiceText(element);
+        var originalLanguage = normalize(movie.original_language);
 
         var markers = [
             'original',
@@ -100,221 +160,287 @@
             'оригінал',
             'english',
             'английский',
-            'англійська',
             'английская',
-            'eng',
-            'en'
+            'англійська',
+            'англійський',
+            ' eng ',
+            '[eng]',
+            '(eng)'
         ];
 
-        if (voice) {
+        if (text) {
             for (var i = 0; i < markers.length; i++) {
-                if (
-                    voice === markers[i] ||
-                    voice.indexOf(markers[i]) !== -1
-                ) {
+                if (text.indexOf(markers[i]) !== -1) {
                     return true;
                 }
             }
 
             if (
                 originalLanguage &&
-                voice === originalLanguage
+                originalLanguage !== 'uk' &&
+                originalLanguage !== 'ru'
             ) {
-                return true;
+                if (
+                    text === originalLanguage ||
+                    text.indexOf('[' + originalLanguage + ']') !== -1 ||
+                    text.indexOf('(' + originalLanguage + ')') !== -1
+                ) {
+                    return true;
+                }
             }
 
             return false;
         }
 
-        /*
-         * Some BWA sources don't pass voice_name
-         * to Lampa.Player.play().
-         *
-         * In that case allow subtitle search anyway.
-         */
-        return isTrue(
-            setting('ua_subs_no_voice_fallback', true)
-        );
+        return boolSetting('unknown_voice_fallback', true);
     }
 
-    function headers(json) {
-        var apiKey = String(
-            setting('ua_subs_api_key', '') || ''
-        ).trim();
+    function alreadyHasUkrainian(element) {
+        var list = element && element.subtitles;
 
-        var token = String(
-            setting('ua_subs_token', '') || ''
-        ).trim();
+        if (!Array.isArray(list)) return false;
 
-        var result = {
-            'Api-Key': apiKey,
-            'User-Agent': 'Lampa-UA-Subs v' + VERSION
-        };
-
-        if (token) {
-            result.Authorization = 'Bearer ' + token;
-        }
-
-        if (json) {
-            result['Content-Type'] = 'application/json';
-        }
-
-        return result;
-    }
-
-    function credentialsAvailable() {
-        var apiKey = String(
-            setting('ua_subs_api_key', '') || ''
-        ).trim();
-
-        var token = String(
-            setting('ua_subs_token', '') || ''
-        ).trim();
-
-        if (!apiKey) {
-            notify(
-                'додай OpenSubtitles API key у налаштуваннях'
+        return list.some(function (sub) {
+            var text = normalize(
+                [
+                    sub.language,
+                    sub.lang,
+                    sub.srclang,
+                    sub.label,
+                    sub.title,
+                    sub.name
+                ]
+                    .filter(Boolean)
+                    .join(' ')
             );
 
+            return (
+                text === 'uk' ||
+                text.indexOf('ukrain') !== -1 ||
+                text.indexOf('укра') !== -1 ||
+                text.indexOf('укр') !== -1
+            );
+        });
+    }
+
+    function apiHeaders(withJson, token) {
+        var key = String(storageGet('api_key', '') || '').trim();
+
+        var headers = {
+            'Api-Key': key,
+            'User-Agent': 'Lampa-UA-Subs/' + VERSION
+        };
+
+        if (withJson) {
+            headers['Content-Type'] = 'application/json';
+        }
+
+        if (token) {
+            headers.Authorization = 'Bearer ' + token;
+        }
+
+        return headers;
+    }
+
+    function credentialsReady() {
+        var apiKey = String(
+            storageGet('api_key', '') || ''
+        ).trim();
+
+        var username = String(
+            storageGet('username', '') || ''
+        ).trim();
+
+        var password = String(
+            storageGet('password', '') || ''
+        );
+
+        if (!apiKey) {
+            noty('вкажи OpenSubtitles API key у налаштуваннях');
             return false;
         }
 
-        if (!token) {
-            notify(
-                'додай OpenSubtitles token у налаштуваннях'
-            );
-
+        if (!username || !password) {
+            noty('вкажи логін і пароль OpenSubtitles');
             return false;
         }
 
         return true;
     }
 
-    /**
-     * Build OpenSubtitles search.
-     *
-     * Prefer TMDB ID.
-     * Fallback:
-     * IMDb ID -> title + year.
-     */
-    function createSearch(movie, element) {
+    async function jsonResponse(response, label) {
+        var text = '';
+
+        try {
+            text = await response.text();
+        } catch (_) {}
+
+        var data = null;
+
+        if (text) {
+            try {
+                data = JSON.parse(text);
+            } catch (_) {}
+        }
+
+        if (!response.ok) {
+            var message =
+                data && (data.message || data.error)
+                    ? data.message || data.error
+                    : text || 'HTTP ' + response.status;
+
+            throw new Error(
+                label + ': ' + String(message).slice(0, 180)
+            );
+        }
+
+        return data || {};
+    }
+
+    async function login(force) {
+        var token = String(
+            storageGet('token', '') || ''
+        );
+
+        var tokenTime = Number(
+            storageGet('token_time', 0) || 0
+        );
+
+        if (
+            !force &&
+            token &&
+            tokenTime &&
+            Date.now() - tokenTime < TOKEN_TTL
+        ) {
+            return token;
+        }
+
+        var username = String(
+            storageGet('username', '') || ''
+        ).trim();
+
+        var password = String(
+            storageGet('password', '') || ''
+        );
+
+        var response = await fetch(API + '/login', {
+            method: 'POST',
+
+            headers: apiHeaders(true, ''),
+
+            body: JSON.stringify({
+                username: username,
+                password: password
+            })
+        });
+
+        var data = await jsonResponse(
+            response,
+            'авторизація'
+        );
+
+        if (!data.token) {
+            throw new Error(
+                'авторизація: OpenSubtitles не повернув token'
+            );
+        }
+
+        storageSet('token', data.token);
+        storageSet('token_time', Date.now());
+
+        return data.token;
+    }
+
+    function buildSearchParams(movie, element) {
         var params = new URLSearchParams();
 
         params.set('languages', 'uk');
+        params.set('order_by', 'download_count');
+        params.set('order_direction', 'desc');
 
-        params.set(
-            'order_by',
-            'download_count'
+        var tmdb = firstValue(
+            movie.tmdb_id,
+            movie.source === 'tmdb' ? movie.id : ''
         );
-
-        params.set(
-            'order_direction',
-            'desc'
-        );
-
-        var tmdb =
-            movie.tmdb_id ||
-            (
-                movie.source === 'tmdb'
-                    ? movie.id
-                    : ''
-            );
 
         var imdb = String(
-            movie.imdb_id || ''
+            firstValue(movie.imdb_id, '') || ''
         ).replace(/^tt/i, '');
 
         if (tmdb) {
-            params.set('tmdb_id', tmdb);
+            params.set('tmdb_id', String(tmdb));
         } else if (imdb) {
             params.set('imdb_id', imdb);
         } else {
-            var title =
-                movie.original_title ||
-                movie.original_name ||
-                movie.title ||
-                movie.name ||
-                element.title ||
-                '';
+            var title = firstValue(
+                movie.original_title,
+                movie.original_name,
+                movie.title,
+                movie.name,
+                element.movie_title,
+                element.title
+            );
 
             if (title) {
-                params.set('query', title);
+                params.set('query', String(title));
             }
 
-            var year = getYear(movie);
+            var year = yearOf(movie);
 
             if (year) {
                 params.set('year', year);
             }
         }
 
-        /*
-         * TV series
-         */
-        var season =
-            element.season ||
-            movie.season_number ||
-            '';
+        var ep = episodeMeta(movie, element);
 
-        var episode =
-            element.episode ||
-            movie.episode_number ||
-            '';
-
-        if (season) {
+        if (ep.season !== '') {
             params.set(
                 'season_number',
-                season
+                String(ep.season)
             );
         }
 
-        if (episode) {
+        if (ep.episode !== '') {
             params.set(
                 'episode_number',
-                episode
+                String(ep.episode)
             );
         }
 
-        return params.toString();
+        return params;
     }
 
-    async function findSubtitle(movie, element) {
-        var query = createSearch(
+    async function searchSubtitle(movie, element) {
+        var params = buildSearchParams(
             movie,
             element
         );
 
-        log('Search:', query);
+        log('search:', params.toString());
 
         var response = await fetch(
-            API + '/subtitles?' + query,
+            API + '/subtitles?' + params.toString(),
             {
                 method: 'GET',
-                headers: headers(false)
+                headers: apiHeaders(false, '')
             }
         );
 
-        if (!response.ok) {
-            throw new Error(
-                'Search HTTP ' + response.status
-            );
-        }
+        var data = await jsonResponse(
+            response,
+            'пошук'
+        );
 
-        var json = await response.json();
-
-        var results = Array.isArray(json.data)
-            ? json.data
+        var rows = Array.isArray(data.data)
+            ? data.data
             : [];
 
-        if (!results.length) {
+        if (!rows.length) {
             return null;
         }
 
-        /*
-         * Prefer normal subtitles instead of
-         * hearing impaired subtitles.
-         */
-        results.sort(function (a, b) {
+        rows.sort(function (a, b) {
             var ah = !!(
                 a.attributes &&
                 a.attributes.hearing_impaired
@@ -325,239 +451,210 @@
                 b.attributes.hearing_impaired
             );
 
-            if (ah !== bh) {
-                return ah ? 1 : -1;
-            }
-
-            return 0;
+            return Number(ah) - Number(bh);
         });
 
-        for (
-            var i = 0;
-            i < results.length;
-            i++
-        ) {
-            var attributes =
-                results[i].attributes || {};
+        for (var i = 0; i < rows.length; i++) {
+            var attrs = rows[i].attributes || {};
 
-            var files =
-                attributes.files || [];
+            var files = Array.isArray(attrs.files)
+                ? attrs.files
+                : [];
 
             if (
-                files.length &&
-                files[0].file_id
+                !files.length ||
+                !files[0].file_id
             ) {
-                return {
-                    file_id:
-                        files[0].file_id,
-
-                    file_name:
-                        files[0].file_name ||
-                        'Українські',
-
-                    release:
-                        attributes.release || ''
-                };
+                continue;
             }
+
+            return {
+                fileId: files[0].file_id,
+
+                fileName:
+                    files[0].file_name ||
+                    'Українські',
+
+                release:
+                    attrs.release || '',
+
+                hearingImpaired:
+                    !!attrs.hearing_impaired
+            };
         }
 
         return null;
     }
 
-    /**
-     * Get temporary subtitle download URL.
-     */
     async function downloadSubtitle(found) {
-        var response = await fetch(
-            API + '/download',
-            {
+        var token = await login(false);
+
+        async function request(currentToken) {
+            return fetch(API + '/download', {
                 method: 'POST',
 
-                headers: headers(true),
+                headers: apiHeaders(
+                    true,
+                    currentToken
+                ),
 
                 body: JSON.stringify({
-                    file_id: found.file_id,
+                    file_id: found.fileId,
                     sub_format: 'srt'
                 })
-            }
+            });
+        }
+
+        var response = await request(token);
+
+        if (
+            response.status === 401 ||
+            response.status === 403
+        ) {
+            storageSet('token', '');
+            storageSet('token_time', 0);
+
+            token = await login(true);
+
+            response = await request(token);
+        }
+
+        var data = await jsonResponse(
+            response,
+            'завантаження'
         );
 
-        if (!response.ok) {
+        if (!data.link) {
             throw new Error(
-                'Download HTTP ' +
-                response.status
+                'OpenSubtitles не повернув URL субтитрів'
             );
         }
 
-        var json = await response.json();
-
-        if (!json.link) {
-            throw new Error(
-                'Subtitle URL missing'
-            );
-        }
-
-        return json.link;
+        return data.link;
     }
 
-    function hasUkrainian(element) {
-        var subtitles =
-            element &&
-            element.subtitles;
-
-        if (!Array.isArray(subtitles)) {
-            return false;
-        }
-
-        return subtitles.some(function (sub) {
-            var language = normalize(
-                sub.language ||
-                sub.lang ||
-                sub.label ||
-                sub.title ||
-                ''
-            );
-
-            return (
-                language === 'uk' ||
-                language.indexOf('ukrain') !== -1 ||
-                language.indexOf('укра') !== -1
-            );
-        });
-    }
-
-    /**
-     * Add Ukrainian track to Lampa.
-     */
-    function attachSubtitle(
+    function addUkrainianTrack(
         element,
         url,
         found
     ) {
-        var subtitle = {
-            label: '🇺🇦 Українські',
-            title: '🇺🇦 Українські',
-
-            language: 'uk',
-            lang: 'uk',
-
-            url: url
-        };
-
         if (!Array.isArray(element.subtitles)) {
             element.subtitles = [];
         }
 
-        element.subtitles.unshift(
-            subtitle
-        );
+        var track = {
+            label: '🇺🇦 Українські',
+            title: '🇺🇦 Українські',
+            name: '🇺🇦 Українські',
 
-        try {
-            if (
-                Lampa.Player &&
-                typeof Lampa.Player.subtitles ===
-                    'function'
-            ) {
-                Lampa.Player.subtitles(
-                    element.subtitles
-                );
-            }
-        } catch (e) {
-            log(
-                'Player.subtitles error:',
-                e
-            );
-        }
+            language: 'uk',
+            lang: 'uk',
+            srclang: 'uk',
+
+            url: url,
+            src: url
+        };
+
+        element.subtitles.unshift(track);
 
         log(
-            'Subtitle attached:',
-            found.file_name,
-            found.release
+            'subtitle attached:',
+            found.fileName,
+            found.release,
+            url
         );
     }
 
-    async function processPlayback(element) {
+    async function enrichBeforePlay(element) {
+        if (!boolSetting('enabled', true)) {
+            return element;
+        }
+
         if (
-            !isTrue(
-                setting(
-                    'ua_subs_enabled',
-                    true
-                )
-            )
+            !element ||
+            typeof element !== 'object'
         ) {
-            return;
+            return element;
         }
 
-        if (!element || !element.url) {
-            return;
+        if (element.__uaSubsProcessed) {
+            return element;
         }
 
-        var movie = getMovie();
+        element.__uaSubsProcessed = true;
 
-        if (!isOriginal(element, movie)) {
+        if (alreadyHasUkrainian(element)) {
             log(
-                'Not original audio:',
-                element.voice_name
+                'skip: Ukrainian subtitles already present'
             );
 
-            return;
+            return element;
         }
 
-        if (hasUkrainian(element)) {
+        var movie = activeMovie();
+
+        if (!isOriginalVoice(element, movie)) {
             log(
-                'Ukrainian subtitles already exist'
+                'skip: selected voice is not original'
             );
 
-            return;
+            return element;
         }
 
-        if (!credentialsAvailable()) {
-            return;
+        if (!credentialsReady()) {
+            return element;
         }
 
-        notify(
-            'шукаю українські субтитри…'
-        );
+        try {
+            noty(
+                'шукаю українські субтитри…'
+            );
 
-        var subtitle =
-            await findSubtitle(
+            var found = await searchSubtitle(
                 movie,
                 element
             );
 
-        if (!subtitle) {
-            notify(
-                'українські субтитри не знайдено'
+            if (!found) {
+                noty(
+                    'українські субтитри не знайдено'
+                );
+
+                return element;
+            }
+
+            var url = await downloadSubtitle(
+                found
             );
 
-            return;
+            addUkrainianTrack(
+                element,
+                url,
+                found
+            );
+
+            noty('субтитри знайдено ✓');
+        } catch (error) {
+            log(
+                'subtitle error:',
+                error
+            );
+
+            noty(
+                error && error.message
+                    ? error.message
+                    : 'помилка пошуку субтитрів'
+            );
         }
 
-        var url =
-            await downloadSubtitle(
-                subtitle
-            );
-
-        attachSubtitle(
-            element,
-            url,
-            subtitle
-        );
-
-        notify(
-            'українські субтитри знайдено ✓'
-        );
+        return element;
     }
 
-    /**
-     * Intercept Lampa playback.
-     */
     function patchPlayer() {
         if (
             !window.Lampa ||
             !Lampa.Player ||
-            typeof Lampa.Player.play !==
-                'function'
+            typeof Lampa.Player.play !== 'function'
         ) {
             setTimeout(
                 patchPlayer,
@@ -569,7 +666,7 @@
 
         if (
             Lampa.Player.play
-                .__uaSubsPatched
+                .__uaSubsV2Patched
         ) {
             return;
         }
@@ -578,79 +675,136 @@
             Lampa.Player.play;
 
         function patchedPlay(element) {
-            var result =
-                originalPlay.apply(
-                    this,
+            var ctx = this;
+
+            var args =
+                Array.prototype.slice.call(
                     arguments
                 );
 
-            Promise.resolve()
-                .then(function () {
-                    return processPlayback(
-                        element
+            if (
+                !boolSetting('enabled', true) ||
+                !element ||
+                typeof element !== 'object' ||
+                alreadyHasUkrainian(element)
+            ) {
+                return originalPlay.apply(
+                    ctx,
+                    args
+                );
+            }
+
+            var movie = activeMovie();
+
+            if (
+                !isOriginalVoice(
+                    element,
+                    movie
+                ) ||
+                !credentialsReady()
+            ) {
+                return originalPlay.apply(
+                    ctx,
+                    args
+                );
+            }
+
+            enrichBeforePlay(element)
+                .catch(function (error) {
+                    log(
+                        'enrich failed:',
+                        error
                     );
                 })
-                .catch(function (error) {
-                    log(error);
-
-                    notify(
-                        'помилка: ' +
-                        (
-                            error.message ||
+                .then(function () {
+                    try {
+                        originalPlay.apply(
+                            ctx,
+                            args
+                        );
+                    } catch (error) {
+                        log(
+                            'original Player.play failed:',
                             error
-                        )
-                    );
+                        );
+
+                        noty(
+                            'не вдалося запустити плеєр'
+                        );
+                    }
                 });
 
-            return result;
+            return undefined;
         }
 
-        patchedPlay.__uaSubsPatched =
+        patchedPlay.__uaSubsV2Patched =
             true;
+
+        patchedPlay.__uaSubsV2Original =
+            originalPlay;
 
         Lampa.Player.play =
             patchedPlay;
 
-        log(
-            'Lampa Player patched'
-        );
+        log('Player.play patched');
     }
 
-    /**
-     * Lampa settings
-     */
     function addSettings() {
         if (
             !window.Lampa ||
-            !Lampa.SettingsApi
+            !Lampa.SettingsApi ||
+            typeof Lampa.SettingsApi.addComponent !==
+                'function' ||
+            typeof Lampa.SettingsApi.addParam !==
+                'function'
+        ) {
+            setTimeout(
+                addSettings,
+                500
+            );
+
+            return;
+        }
+
+        if (
+            window.__lampaUaSubsV2Settings
         ) {
             return;
         }
 
+        window.__lampaUaSubsV2Settings =
+            true;
+
         try {
             Lampa.SettingsApi.addComponent({
-                component: 'ua_subs',
+                component: 'ua_subs_v2',
 
-                name: 'UA Subs'
+                name: 'UA Subs',
+
+                icon:
+                    '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">' +
+                    '<rect x="2.5" y="5" width="19" height="14" rx="2" stroke="currentColor" stroke-width="2"/>' +
+                    '<path d="M6 10h5M6 14h5M14 10h4M14 14h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+                    '</svg>'
             });
-        } catch (e) {}
 
-        try {
             Lampa.SettingsApi.addParam({
-                component: 'ua_subs',
+                component: 'ua_subs_v2',
 
                 param: {
                     name:
-                        'ua_subs_enabled',
+                        PREFIX +
+                        'enabled',
 
                     type: 'trigger',
+
+                    values: '',
 
                     default: true
                 },
 
                 field: {
-                    name:
-                        'Увімкнути UA Subs',
+                    name: 'Увімкнути',
 
                     description:
                         'Автоматично шукати українські субтитри'
@@ -658,13 +812,16 @@
             });
 
             Lampa.SettingsApi.addParam({
-                component: 'ua_subs',
+                component: 'ua_subs_v2',
 
                 param: {
                     name:
-                        'ua_subs_original_only',
+                        PREFIX +
+                        'original_only',
 
                     type: 'trigger',
+
+                    values: '',
 
                     default: true
                 },
@@ -674,97 +831,12 @@
                         'Тільки Original',
 
                     description:
-                        'Шукати субтитри для оригінальної озвучки'
+                        'Шукати субтитри лише для оригінальної аудіодоріжки'
                 }
             });
 
             Lampa.SettingsApi.addParam({
-                component: 'ua_subs',
+                component: 'ua_subs_v2',
 
                 param: {
-                    name:
-                        'ua_subs_no_voice_fallback',
-
-                    type: 'trigger',
-
-                    default: true
-                },
-
-                field: {
-                    name:
-                        'Шукати якщо озвучка невідома',
-
-                    description:
-                        'Для BWA джерел без voice_name'
-                }
-            });
-
-            Lampa.SettingsApi.addParam({
-                component: 'ua_subs',
-
-                param: {
-                    name:
-                        'ua_subs_api_key',
-
-                    type: 'input',
-
-                    default: ''
-                },
-
-                field: {
-                    name:
-                        'OpenSubtitles API key',
-
-                    description:
-                        'API key OpenSubtitles.com'
-                }
-            });
-
-            Lampa.SettingsApi.addParam({
-                component: 'ua_subs',
-
-                param: {
-                    name:
-                        'ua_subs_token',
-
-                    type: 'input',
-
-                    default: ''
-                },
-
-                field: {
-                    name:
-                        'OpenSubtitles token',
-
-                    description:
-                        'Bearer token для завантаження субтитрів'
-                }
-            });
-        } catch (e) {
-            log(
-                'Settings error:',
-                e
-            );
-        }
-    }
-
-    function start() {
-        if (!window.Lampa) {
-            setTimeout(
-                start,
-                500
-            );
-
-            return;
-        }
-
-        addSettings();
-        patchPlayer();
-
-        log(
-            'Started v' + VERSION
-        );
-    }
-
-    start();
-})();
+     
